@@ -11,7 +11,7 @@ from app.api.dashboard import router as dashboard_router
 from app.api.roster import router as roster_router
 from app.api.routes import router as api_router
 from app.core.config import Settings, get_settings
-from app.core.database import init_db
+from app.core.database import create_database
 from app.services.gemini_client import GeminiJsonClient, close_client
 from app.services.job_queue import build_job_queue
 from app.services.jobs import JobRunner
@@ -24,15 +24,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.db = create_database(app_settings)
         app.state.ai_client = GeminiJsonClient(app_settings)
-        app.state.job_runner = JobRunner(app_settings, app.state.ai_client)
+        app.state.job_runner = JobRunner(
+            app_settings,
+            app.state.ai_client,
+            app.state.db.sessionmaker,
+        )
         app.state.grading_queue = build_job_queue(app_settings, app.state.job_runner)
         app.state.message_sender = build_message_sender(app_settings)
-        await init_db()
+        await app.state.db.init()
         try:
             yield
         finally:
             await close_client(app.state.ai_client)
+            await app.state.db.dispose()
 
     app = FastAPI(title=app_settings.app_name, lifespan=lifespan)
     app.state.settings = app_settings
