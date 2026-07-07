@@ -7,9 +7,9 @@ from datetime import date
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
-from app.core.database import AsyncSessionLocal
 from app.models import (
     ClassRoom,
     Exam,
@@ -34,9 +34,15 @@ from app.services.policy import infer_growth_label, normalize_ocr_result
 
 
 class JobRunner:
-    def __init__(self, settings: Settings, ai_client: GeminiJsonClient) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        ai_client: GeminiJsonClient,
+        sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
         self.settings = settings
         self.ai_client = ai_client
+        self.sessionmaker = sessionmaker
         self._ocr_semaphore = asyncio.Semaphore(settings.ocr_concurrency)
         self._grading_semaphore = asyncio.Semaphore(settings.grading_concurrency)
 
@@ -51,7 +57,7 @@ class JobRunner:
         exam_date: date | None,
     ) -> GradingJob:
         self.settings.ensure_directories()
-        async with AsyncSessionLocal() as session:
+        async with self.sessionmaker() as session:
             exam = Exam(
                 class_id=class_id,
                 title=title,
@@ -104,7 +110,7 @@ class JobRunner:
         await self._mark_job_failed(job_id, error_message)
 
     async def _mark_job_started(self, job_id: str) -> None:
-        async with AsyncSessionLocal() as session:
+        async with self.sessionmaker() as session:
             job = await session.get(GradingJob, job_id)
             if job is None:
                 raise ValueError(f"job not found: {job_id}")
@@ -113,7 +119,7 @@ class JobRunner:
             await session.commit()
 
     async def _render_and_create_submissions(self, job_id: str) -> list[tuple[str, int]]:
-        async with AsyncSessionLocal() as session:
+        async with self.sessionmaker() as session:
             job = await session.get(GradingJob, job_id)
             if job is None:
                 raise ValueError(f"job not found: {job_id}")
@@ -145,7 +151,7 @@ class JobRunner:
             return created
 
     async def _process_submission(self, submission_id: str) -> None:
-        async with AsyncSessionLocal() as session:
+        async with self.sessionmaker() as session:
             submission = await session.get(Submission, submission_id)
             if submission is None:
                 raise ValueError(f"submission not found: {submission_id}")
@@ -162,7 +168,7 @@ class JobRunner:
 
         try:
             async with self._ocr_semaphore:
-                async with AsyncSessionLocal() as session:
+                async with self.sessionmaker() as session:
                     submission = await session.get(Submission, submission_id)
                     submission.status = SubmissionStatus.OCR_RUNNING.value
                     await session.commit()
@@ -180,7 +186,7 @@ class JobRunner:
             history = await self._student_history(match.student_id) if match.student_id else {}
 
             async with self._grading_semaphore:
-                async with AsyncSessionLocal() as session:
+                async with self.sessionmaker() as session:
                     submission = await session.get(Submission, submission_id)
                     submission.status = SubmissionStatus.GRADING_RUNNING.value
                     submission.raw_ocr_json = dumps_model(ocr)
@@ -201,7 +207,7 @@ class JobRunner:
                     settings=self.settings,
                 )
 
-            async with AsyncSessionLocal() as session:
+            async with self.sessionmaker() as session:
                 submission = await session.get(Submission, submission_id)
                 submission.raw_ocr_json = dumps_model(ocr)
                 submission.graded_json = dumps_model(grading)
@@ -226,7 +232,7 @@ class JobRunner:
                     job.processed_pages += 1
                 await session.commit()
         except Exception as exc:
-            async with AsyncSessionLocal() as session:
+            async with self.sessionmaker() as session:
                 submission = await session.get(Submission, submission_id)
                 if submission is not None:
                     submission.status = SubmissionStatus.FAILED.value
@@ -239,7 +245,7 @@ class JobRunner:
             raise
 
     async def _load_comments(self, exam_id: str) -> list[InstructorCommentInput]:
-        async with AsyncSessionLocal() as session:
+        async with self.sessionmaker() as session:
             result = await session.execute(
                 select(InstructorComment)
                 .where(InstructorComment.exam_id == exam_id)
@@ -266,7 +272,7 @@ class JobRunner:
         class_id: str,
     ) -> StudentMatch:
         clean_name = name.strip() or "Unknown"
-        async with AsyncSessionLocal() as session:
+        async with self.sessionmaker() as session:
             class_room = await session.get(ClassRoom, class_id)
             if class_room is None:
                 raise ValueError(f"class not found: {class_id}")
@@ -325,7 +331,7 @@ class JobRunner:
     async def _student_history(self, student_id: str | None) -> dict:
         if student_id is None:
             return {}
-        async with AsyncSessionLocal() as session:
+        async with self.sessionmaker() as session:
             result = await session.execute(
                 select(Submission, Exam)
                 .join(Exam, Exam.id == Submission.exam_id)
@@ -347,7 +353,7 @@ class JobRunner:
             }
 
     async def _mark_job_finished(self, job_id: str, failed: int) -> None:
-        async with AsyncSessionLocal() as session:
+        async with self.sessionmaker() as session:
             job = await session.get(GradingJob, job_id)
             if job is None:
                 return
@@ -357,7 +363,7 @@ class JobRunner:
             await session.commit()
 
     async def _mark_job_failed(self, job_id: str, error_message: str) -> None:
-        async with AsyncSessionLocal() as session:
+        async with self.sessionmaker() as session:
             job = await session.get(GradingJob, job_id)
             if job is None:
                 return
