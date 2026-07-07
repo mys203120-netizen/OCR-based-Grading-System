@@ -2,17 +2,37 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.models import ClassRoom, Exam, GradingJob, Instructor, Student
+from app.services.job_queue import JobQueue
+from app.services.jobs import JobRunner
+from app.services.messaging import MessageSender
 
 
 async def get_instructor_id(
     x_instructor_id: Annotated[str, Header(alias="X-Instructor-Id")],
 ) -> str:
     return x_instructor_id
+
+
+def get_runner(request: Request) -> JobRunner:
+    return request.app.state.job_runner
+
+
+def get_app_settings(request: Request) -> Settings:
+    return request.app.state.settings
+
+
+def get_job_queue(request: Request) -> JobQueue:
+    return request.app.state.grading_queue
+
+
+def get_message_sender(request: Request) -> MessageSender:
+    return request.app.state.message_sender
 
 
 async def ensure_instructor(session: AsyncSession, instructor_id: str) -> Instructor:
