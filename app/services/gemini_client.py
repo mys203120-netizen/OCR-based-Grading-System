@@ -5,14 +5,32 @@ import json
 from pathlib import Path
 from typing import TypeVar
 
-from pydantic import BaseModel
-from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
+from pydantic import BaseModel, ValidationError
+from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.core.config import Settings
 from app.models import GradeBand
 from app.schemas import GradedAnswer, GradingResult, OcrAnswer, OcrResult, StudentInfo
 
 T = TypeVar("T", bound=BaseModel)
+
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+class GeminiResponseError(RuntimeError):
+    pass
+
+
+class GeminiEmptyResponseError(GeminiResponseError):
+    pass
+
+
+class GeminiSchemaError(GeminiResponseError):
+    pass
+
+
+class GeminiSafetyBlockedError(GeminiResponseError):
+    pass
 
 
 class GeminiJsonClient:
@@ -65,7 +83,7 @@ class GeminiJsonClient:
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=1, max=8),
-            retry=retry_if_exception_type((TimeoutError, ConnectionError)),
+            retry=retry_if_exception(_is_retryable_exception),
             reraise=True,
         ):
             with attempt:
@@ -75,7 +93,7 @@ class GeminiJsonClient:
                     contents=contents,
                     config=config,
                 )
-                return response_model.model_validate_json(response.text)
+                return _validate_response_json(response_model, _extract_response_text(response))
 
         raise RuntimeError("Gemini response generation failed")
 
@@ -129,6 +147,72 @@ class GeminiJsonClient:
             )
         payload = json.loads("{}")
         return response_model.model_validate(payload)
+
+
+def _is_retryable_exception(exc: BaseException) -> bool:
+    if isinstance(
+        exc,
+        (
+            TimeoutError,
+            ConnectionError,
+            GeminiEmptyResponseError,
+            GeminiSchemaError,
+        ),
+    ):
+        return True
+    status_code = _exception_status_code(exc)
+    return status_code in _RETRYABLE_STATUS_CODES
+
+
+def _exception_status_code(exc: BaseException) -> int | None:
+    for attr in ("status_code", "code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    response = getattr(exc, "response", None)
+    value = getattr(response, "status_code", None)
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _extract_response_text(response: object) -> str:
+    block_reason = _response_block_reason(response)
+    if block_reason:
+        raise GeminiSafetyBlockedError(f"Gemini response blocked: {block_reason}")
+    text = getattr(response, "text", None)
+    if text and text.strip():
+        return text
+    finish_reason = _first_candidate_finish_reason(response)
+    if finish_reason and "SAFETY" in finish_reason.upper():
+        raise GeminiSafetyBlockedError(f"Gemini response blocked: {finish_reason}")
+    if finish_reason:
+        raise GeminiEmptyResponseError(f"Gemini returned empty response: {finish_reason}")
+    raise GeminiEmptyResponseError("Gemini returned empty response")
+
+
+def _response_block_reason(response: object) -> str | None:
+    feedback = getattr(response, "prompt_feedback", None)
+    reason = getattr(feedback, "block_reason", None)
+    if reason:
+        return str(reason)
+    return None
+
+
+def _first_candidate_finish_reason(response: object) -> str | None:
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        return None
+    return str(getattr(candidates[0], "finish_reason", "") or "") or None
+
+
+def _validate_response_json(response_model: type[T], text: str) -> T:
+    try:
+        return response_model.model_validate_json(text)
+    except (ValidationError, ValueError) as exc:
+        raise GeminiSchemaError(f"Gemini response did not match {response_model.__name__}") from exc
 
 
 async def close_client(client: GeminiJsonClient) -> None:
