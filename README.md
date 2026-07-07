@@ -118,6 +118,8 @@ python -m ruff check .
 python -m compileall app tests
 ```
 
+GitHub Actions CI도 같은 검증을 실행합니다.
+
 ## 카카오 알림톡 설정
 
 카톡 발송은 SOLAPI 알림톡(ATA) 기준입니다. SOLAPI 콘솔에서 카카오 채널, 알림톡 템플릿을 승인받은 뒤 아래 값을 채웁니다.
@@ -138,3 +140,7 @@ python -m compileall app tests
 채점 작업은 Redis Queue(RQ)로 들어갑니다. API 서버와 워커를 분리 실행해야 PDF 업로드 요청이 모델 처리 시간 때문에 오래 붙잡히지 않습니다.
 
 답안지 이미지는 `/storage/...` 정적 URL로 제공됩니다. API 응답에는 서버 내부 보관 경로인 `image_path`와 브라우저 표시용 `image_url`이 함께 내려갑니다.
+
+## 라이선스
+
+MIT License로 배포합니다. 자세한 내용은 `LICENSE`를 확인하세요.
