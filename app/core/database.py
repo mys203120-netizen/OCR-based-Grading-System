@@ -1,23 +1,48 @@
+from __future__ import annotations
+
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 
+from fastapi import Request
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
-from app.core.config import get_settings
-
-settings = get_settings()
-
-engine = create_async_engine(settings.database_url, echo=settings.sql_echo, future=True)
-AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+from app.core.config import Settings
 
 
-async def init_db() -> None:
-    from app.models import Base
+@dataclass(frozen=True)
+class Database:
+    settings: Settings
+    engine: AsyncEngine
+    sessionmaker: async_sessionmaker[AsyncSession]
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        if settings.database_url.startswith("sqlite"):
-            await _ensure_sqlite_columns(conn)
+    async def init(self) -> None:
+        from app.models import Base
+
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            if self.settings.database_url.startswith("sqlite"):
+                await _ensure_sqlite_columns(conn)
+
+    async def dispose(self) -> None:
+        await self.engine.dispose()
+
+
+def create_database(settings: Settings) -> Database:
+    engine = create_async_engine(settings.database_url, echo=settings.sql_echo, future=True)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    return Database(settings=settings, engine=engine, sessionmaker=sessionmaker)
+
+
+async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
+    database: Database = request.app.state.db
+    async with database.sessionmaker() as session:
+        yield session
 
 
 async def _ensure_sqlite_columns(conn) -> None:
@@ -61,8 +86,3 @@ async def _ensure_sqlite_columns(conn) -> None:
                 await conn.execute(
                     text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
                 )
-
-
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    async with AsyncSessionLocal() as session:
-        yield session
